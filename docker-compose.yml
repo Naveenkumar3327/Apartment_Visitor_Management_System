@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: greenwood_gate_manager
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=file:./prisma/dev.db
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=f10beae7a107bf45722129e9514e82df42db5ec4a5df107ae8ad2691f3a53232
+    volumes:
+      - db-data:/app/prisma
+    restart: always
+
+volumes:
+  db-data:

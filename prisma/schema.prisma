@@ -1,0 +1,258 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // To switch to PostgreSQL, change the provider to "postgresql" and update DATABASE_URL in .env
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String          @id @default(uuid())
+  name           String
+  email          String          @unique
+  password       String
+  role           String          // "SUPER_ADMIN", "APARTMENT_ADMIN", "SECURITY_GUARD", "RESIDENT"
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  
+  // Relations
+  resident       Resident?
+  securityGuard  SecurityGuard?
+  notifications  Notification[]
+  activityLogs   ActivityLog[]
+  emergencyAlerts EmergencyAlert[]
+}
+
+model Apartment {
+  id                String           @id @default(uuid())
+  name              String
+  address           String
+  blocksCount       Int              @default(1)
+  floorsCount       Int              @default(1)
+  flatsCount        Int              @default(1)
+  logoUrl           String?
+  images            String?          // JSON string for URLs
+  emergencyContacts String?          // JSON string
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  // Relations
+  blocks            Block[]
+  flats             Flat[]
+  guards            SecurityGuard[]
+  announcements     Announcement[]
+  emergencyAlerts   EmergencyAlert[]
+  settings          Settings[]
+}
+
+model Block {
+  id          String    @id @default(uuid())
+  name        String    // e.g. "Block A"
+  apartmentId String
+  apartment   Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  flats       Flat[]
+}
+
+model Floor {
+  id      String @id @default(uuid())
+  number  Int
+  flats   Flat[]
+}
+
+model Flat {
+  id          String    @id @default(uuid())
+  number      String    // e.g. "101"
+  blockId     String
+  block       Block     @relation(fields: [blockId], references: [id], onDelete: Cascade)
+  floorId     String
+  floor       Floor     @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  apartmentId String
+  apartment   Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  
+  // Relations
+  residents   Resident[]
+  visitorLogs VisitorLog[]
+  passes      VisitorPass[]
+}
+
+model Resident {
+  id               String            @id @default(uuid())
+  userId           String            @unique
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flatId           String
+  flat             Flat              @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  isOwner          Boolean           @default(true)
+  phone            String
+  email            String
+  vehicleDetails   String?           // JSON string: e.g. [{ plate: "KA-01-1234", type: "Car" }]
+  emergencyContact String?           // JSON string: { name, relationship, phone }
+  photoUrl         String?
+  documentUrl      String?
+  moveInDate       DateTime          @default(now())
+  moveOutDate      DateTime?
+  status           String            @default("ACTIVE") // "ACTIVE", "INACTIVE"
+  familyMembers    String?           // JSON string: [{ name, age, relation }]
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  // Relations
+  approvals        VisitorApproval[]
+  visitorLogs      VisitorLog[]
+  passes           VisitorPass[]
+}
+
+model SecurityGuard {
+  id           String    @id @default(uuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apartmentId  String
+  apartment    Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  shift        String    @default("DAY") // "DAY", "NIGHT", "ROUTINE"
+  assignedGate String    @default("Gate 1")
+  phone        String
+  idCard       String?
+  photoUrl     String?
+  performance  Float     @default(5.0)
+  attendance   String?   // JSON string log of clock-in/out
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Visitor {
+  id            String       @id @default(uuid())
+  name          String
+  phone         String       @unique
+  email         String?
+  gender        String?
+  address       String?
+  idProof       String?      // JSON string: { type: "Aadhaar/DriverLicense", number: "1234..." }
+  photoUrl      String?
+  isBlacklisted Boolean      @default(false)
+  notes         String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  // Relations
+  logs          VisitorLog[]
+}
+
+model VisitorLog {
+  id              String           @id @default(uuid())
+  visitorId       String
+  visitor         Visitor          @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  flatId          String
+  flat            Flat             @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  residentId      String?
+  resident        Resident?        @relation(fields: [residentId], references: [id], onDelete: SetNull)
+  purpose         String           @default("GUEST") // "GUEST", "DELIVERY", "MAINTENANCE", "COURIER", "CAB", "FOOD", "DOMESTIC_HELP", "VENDOR", "OTHER"
+  vehicleNumber   String?
+  visitorType     String           @default("Guest") // e.g. Courier, Cab, Friends
+  expectedArrival DateTime?
+  actualArrival   DateTime?
+  expectedExit    DateTime?
+  actualExit      DateTime?
+  status          String           @default("PENDING") // "PENDING", "APPROVED", "REJECTED", "INSIDE", "EXITED"
+  gateEntry       String?
+  gateExit        String?
+  notes           String?
+  isEmergency     Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  // Relations
+  approval        VisitorApproval?
+  pass            VisitorPass?     @relation(fields: [passId], references: [id], onDelete: SetNull)
+  passId          String?          @unique
+}
+
+model VisitorApproval {
+  id          String     @id @default(uuid())
+  logId       String     @unique
+  log         VisitorLog @relation(fields: [logId], references: [id], onDelete: Cascade)
+  residentId  String
+  resident    Resident   @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  status      String     @default("PENDING") // "PENDING", "APPROVED", "REJECTED", "EXPIRED"
+  notes       String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model VisitorPass {
+  id           String      @id @default(uuid())
+  code         String      @unique // Unique shortcode or QR string
+  visitorName  String
+  visitorPhone String
+  visitorType  String      @default("Guest")
+  flatId       String
+  flat         Flat        @relation(fields: [flatId], references: [id], onDelete: Cascade)
+  residentId   String
+  resident     Resident    @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  expiryTime   DateTime
+  isOneTime    Boolean     @default(true)
+  isUsed       Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+
+  // Reverse relation from VisitorLog
+  visitorLog   VisitorLog?
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  title     String
+  message   String
+  type      String   @default("PUSH") // "EMAIL", "SMS", "PUSH", "WHATSAPP"
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Announcement {
+  id          String    @id @default(uuid())
+  apartmentId String
+  apartment   Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  title       String
+  content     String
+  type        String    @default("NOTICE") // "EMERGENCY", "MAINTENANCE", "FESTIVAL", "NOTICE"
+  createdAt   DateTime  @default(now())
+}
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String   // e.g. "LOGIN", "CHECK_IN", "APPROVED_VISITOR"
+  details   String
+  ipAddress String?
+  createdAt DateTime @default(now())
+}
+
+model EmergencyAlert {
+  id            String    @id @default(uuid())
+  apartmentId   String
+  apartment     Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  triggeredById String
+  triggeredBy   User      @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
+  type          String    @default("PANIC") // "FIRE", "MEDICAL", "POLICE", "PANIC"
+  status        String    @default("ACTIVE") // "ACTIVE", "RESOLVED"
+  notes         String?
+  createdAt     DateTime  @default(now())
+}
+
+model Settings {
+  id                   String    @id @default(uuid())
+  apartmentId          String    @unique
+  apartment            Apartment @relation(fields: [apartmentId], references: [id], onDelete: Cascade)
+  workingHours         String    @default("06:00 - 22:00")
+  visitorTimeLimit     Int       @default(120) // Limit in minutes
+  approvalRules        String    @default("REQUIRE_ALL") // e.g. rules
+  qrExpiry             Int       @default(1440) // QR code expiry limit in minutes (default 24h)
+  notificationSettings String    @default("EMAIL_SMS") // Notification configurations
+  theme                String    @default("LIGHT") // default theme
+  language             String    @default("en") // default lang
+}
