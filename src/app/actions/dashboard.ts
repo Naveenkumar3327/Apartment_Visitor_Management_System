@@ -43,6 +43,9 @@ export async function getDashboardData() {
     }
     return data;
   } catch (error: any) {
+    if (error.digest === "DYNAMIC_SERVER_USAGE" || error.message?.includes("Dynamic server usage")) {
+      throw error;
+    }
     console.error("Dashboard Server Action error:", error);
     return { error: error.message || "Failed to load dashboard metrics." };
   }
