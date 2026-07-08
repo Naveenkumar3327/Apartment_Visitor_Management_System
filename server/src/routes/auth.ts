@@ -1,10 +1,14 @@
 import { Router, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { User, Resident, SecurityGuard, Flat, Block, Floor, Apartment, ActivityLog } from '../models';
+import crypto from 'crypto';
+import { User, Resident, SecurityGuard, Flat, Block, Floor, Apartment, ActivityLog, RefreshToken, Settings } from '../models';
 import { authenticateJWT, AuthenticatedRequest } from '../middleware/auth';
+import { validateRequest, loginSchema, registerResidentSchema, profileUpdateSchema } from '../middleware/validation';
+import { auditLogger } from '../middleware/audit';
 
 const router = Router();
+router.use(auditLogger('Authentication'));
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-jwt-key-2026-visitor-app-secret';
 
 // Helper to log activity
@@ -17,7 +21,7 @@ async function logActivity(userId: string | null, action: string, details: strin
 }
 
 // 1. Register Resident
-router.post('/register', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/register', validateRequest(registerResidentSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, email, passwordHash, phone, blockName, flatNumber, isOwner } = req.body;
     const emailLower = email.toLowerCase();
@@ -90,7 +94,7 @@ router.post('/register', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // 2. Login
-router.post('/login', async (req: AuthenticatedRequest, res: Response) => {
+router.post('/login', validateRequest(loginSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { email, password } = req.body;
 
@@ -100,16 +104,18 @@ router.post('/login', async (req: AuthenticatedRequest, res: Response) => {
 
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
-      return res.status(401).json({ error: 'No user found with this email' });
+      await logActivity(null, 'LOGIN_FAILURE', `Failed login attempt for email: ${email}`, req.ip);
+      return res.status(401).json({ error: 'Incorrect email or password' });
     }
 
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
-      return res.status(401).json({ error: 'Incorrect password' });
+      await logActivity(user.id, 'LOGIN_FAILURE', `Failed login attempt (incorrect password) for user: ${user.name}`, req.ip);
+      return res.status(401).json({ error: 'Incorrect email or password' });
     }
 
-    // Generate JWT
-    const token = jwt.sign(
+    // Generate Short-lived Access Token (15 minutes)
+    const accessToken = jwt.sign(
       {
         id: user.id,
         name: user.name,
@@ -117,13 +123,37 @@ router.post('/login', async (req: AuthenticatedRequest, res: Response) => {
         role: user.role,
       },
       JWT_SECRET,
-      { expiresIn: '30d' }
+      { expiresIn: '15m' }
     );
 
-    await logActivity(user.id, 'LOGIN', `User ${user.name} logged in successfully.`);
+    // Generate Refresh Token
+    const refreshToken = crypto.randomBytes(40).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7); // 7 days expiry
+
+    // Retrieve Settings to check Single Active Session
+    const settings = await Settings.findOne();
+    if (settings?.singleSessionPerUser) {
+      // Revoke all previous active sessions
+      await RefreshToken.updateMany({ userId: user._id, isRevoked: false }, { isRevoked: true });
+      await logActivity(user.id, 'CONCURRENT_SESSION_REVOKED', `Previous sessions revoked due to new login.`, req.ip);
+    }
+
+    // Save Refresh Token to DB
+    await RefreshToken.create({
+      userId: user._id,
+      token: refreshToken,
+      expiresAt,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || 'Unknown',
+      isRevoked: false,
+    });
+
+    await logActivity(user.id, 'LOGIN_SUCCESS', `User ${user.name} logged in successfully.`, req.ip);
 
     res.json({
-      token,
+      token: accessToken,
+      refreshToken,
       user: {
         id: user.id,
         name: user.name,
@@ -133,7 +163,105 @@ router.post('/login', async (req: AuthenticatedRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error('Login API error:', error);
-    res.status(500).json({ error: error.message || 'An error occurred during login.' });
+    res.status(500).json({ error: 'An error occurred during login.' });
+  }
+});
+
+// Refresh Token Rotation Endpoint
+router.post('/refresh', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'Refresh token is required' });
+    }
+
+    // Find token in database
+    const dbToken = await RefreshToken.findOne({ token: refreshToken });
+    if (!dbToken) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    // Check if token is revoked (Reuse Detection / Session Hijacking Prevention)
+    if (dbToken.isRevoked) {
+      // Revoke all tokens for this user as a safety measure
+      await RefreshToken.updateMany({ userId: dbToken.userId }, { isRevoked: true });
+      await logActivity(
+        dbToken.userId.toString(),
+        'TOKEN_REUSE_DETECTED',
+        `Warning: Revoked refresh token reused! All sessions revoked.`,
+        req.ip
+      );
+      return res.status(401).json({ error: 'Token reuse detected. Session terminated.' });
+    }
+
+    // Check expiry
+    if (new Date() > dbToken.expiresAt) {
+      return res.status(401).json({ error: 'Refresh token has expired' });
+    }
+
+    // Mark current refresh token as revoked
+    dbToken.isRevoked = true;
+    await dbToken.save();
+
+    // Fetch user details
+    const user = await User.findById(dbToken.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Generate new access token
+    const newAccessToken = jwt.sign(
+      {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    // Generate new refresh token
+    const newRefreshToken = crypto.randomBytes(40).toString('hex');
+    const newExpiresAt = new Date();
+    newExpiresAt.setDate(newExpiresAt.getDate() + 7);
+
+    // Save new refresh token to DB
+    await RefreshToken.create({
+      userId: user._id,
+      token: newRefreshToken,
+      expiresAt: newExpiresAt,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || 'Unknown',
+      isRevoked: false,
+    });
+
+    res.json({
+      token: newAccessToken,
+      refreshToken: newRefreshToken,
+    });
+  } catch (error: any) {
+    console.error('Refresh token error:', error);
+    res.status(500).json({ error: 'An error occurred during token refresh.' });
+  }
+});
+
+// Logout Endpoint
+router.post('/logout', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { refreshToken } = req.body;
+    if (refreshToken) {
+      const dbToken = await RefreshToken.findOne({ token: refreshToken });
+      if (dbToken) {
+        dbToken.isRevoked = true;
+        await dbToken.save();
+        await logActivity(dbToken.userId.toString(), 'LOGOUT', `User logged out successfully.`, req.ip);
+      }
+    }
+    res.json({ success: true, message: 'Logged out successfully.' });
+  } catch (error: any) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'An error occurred during logout.' });
   }
 });
 
@@ -168,7 +296,7 @@ router.get('/profile', authenticateJWT, async (req: AuthenticatedRequest, res: R
 });
 
 // 4. Update Profile
-router.put('/profile', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+router.put('/profile', authenticateJWT, validateRequest(profileUpdateSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 

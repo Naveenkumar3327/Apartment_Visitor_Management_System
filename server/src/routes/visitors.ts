@@ -1,10 +1,13 @@
 import { Router, Response } from 'express';
 import { Visitor, VisitorLog, VisitorApproval, VisitorPass, Flat, Resident, User, Notification, ActivityLog } from '../models';
 import { authenticateJWT, AuthenticatedRequest } from '../middleware/auth';
+import { validateRequest, visitorCheckInSchema } from '../middleware/validation';
+import { auditLogger } from '../middleware/audit';
 
 const router = Router();
+router.use(auditLogger('Visitors'));
 
-// Helper to log activity
+// Helper to log activity (retained for manual logging inside router functions)
 async function logActivity(userId: string | null, action: string, details: string) {
   try {
     await ActivityLog.create({ userId, action, details });
@@ -14,7 +17,7 @@ async function logActivity(userId: string | null, action: string, details: strin
 }
 
 // 1. Guard check-in action
-router.post('/checkin', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/checkin', authenticateJWT, validateRequest(visitorCheckInSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 

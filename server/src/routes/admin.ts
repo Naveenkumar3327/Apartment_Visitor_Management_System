@@ -2,13 +2,41 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { SecurityGuard, User, Resident, Apartment, Settings, ActivityLog, Flat, Block, VisitorLog } from '../models';
 import { authenticateJWT, AuthenticatedRequest, requireRoles } from '../middleware/auth';
+import { validateRequest, settingsUpdateSchema } from '../middleware/validation';
+import { auditLogger } from '../middleware/audit';
+import { runEncryptedBackup } from '../utils/backup';
 
 const router = Router();
 
-// Helper to log activity
+// Helper to log activity manually (retained for custom log events in handlers)
 async function logActivity(userId: string | null, action: string, details: string) {
   try {
-    await ActivityLog.create({ userId, action, details });
+    let username = 'system';
+    let fullName = 'System';
+    let role = 'SYSTEM';
+    let email = '';
+    
+    if (userId) {
+      const user = await User.findById(userId);
+      if (user) {
+        username = user.email.split('@')[0];
+        fullName = user.name;
+        role = user.role;
+        email = user.email;
+      }
+    }
+    
+    await ActivityLog.create({
+      userId,
+      username,
+      fullName,
+      role,
+      email,
+      action,
+      details,
+      status: 'SUCCESS',
+      lastActivityTime: new Date()
+    });
   } catch (error) {
     console.error('Failed to log activity:', error);
   }
@@ -17,6 +45,7 @@ async function logActivity(userId: string | null, action: string, details: strin
 // Ensure only admins can access these endpoints
 router.use(authenticateJWT);
 router.use(requireRoles(['SUPER_ADMIN', 'APARTMENT_ADMIN']));
+router.use(auditLogger('Administration'));
 
 // ==================== GUARD MANAGEMENT ====================
 
@@ -226,9 +255,9 @@ router.get('/settings', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // 4. Update Settings
-router.put('/settings', async (req: AuthenticatedRequest, res: Response) => {
+router.put('/settings', validateRequest(settingsUpdateSchema), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { workingHours, visitorTimeLimit, approvalRules, qrExpiry, notificationSettings, theme, language } = req.body;
+    const { workingHours, visitorTimeLimit, approvalRules, qrExpiry, notificationSettings, theme, language, singleSessionPerUser } = req.body;
     let settings = await Settings.findOne();
 
     if (!settings) {
@@ -242,6 +271,7 @@ router.put('/settings', async (req: AuthenticatedRequest, res: Response) => {
         notificationSettings,
         theme,
         language,
+        singleSessionPerUser,
       });
     } else {
       if (workingHours !== undefined) settings.workingHours = workingHours;
@@ -251,6 +281,7 @@ router.put('/settings', async (req: AuthenticatedRequest, res: Response) => {
       if (notificationSettings !== undefined) settings.notificationSettings = notificationSettings;
       if (theme !== undefined) settings.theme = theme;
       if (language !== undefined) settings.language = language;
+      if (singleSessionPerUser !== undefined) settings.singleSessionPerUser = singleSessionPerUser;
       await settings.save();
     }
 
@@ -264,13 +295,128 @@ router.put('/settings', async (req: AuthenticatedRequest, res: Response) => {
 
 // ==================== ACTIVITY & AUDIT LOGS ====================
 
-// Get all Activity Logs
+// Get all Activity Logs (with Advanced Filtering & Pagination)
 router.get('/activity-logs', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const logs = await ActivityLog.find().populate('userId').sort({ createdAt: -1 });
-    res.json(logs);
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = (page - 1) * limit;
+
+    const filter: any = {};
+
+    // Apply filters
+    if (req.query.username) {
+      filter.username = { $regex: req.query.username as string, $options: 'i' };
+    }
+    if (req.query.role && req.query.role !== 'ALL') {
+      filter.role = req.query.role;
+    }
+    if (req.query.deviceType && req.query.deviceType !== 'ALL') {
+      filter.deviceType = req.query.deviceType;
+    }
+    if (req.query.location) {
+      filter.location = { $regex: req.query.location as string, $options: 'i' };
+    }
+    if (req.query.action && req.query.action !== 'ALL') {
+      filter.action = req.query.action;
+    }
+    if (req.query.status && req.query.status !== 'ALL') {
+      filter.status = req.query.status;
+    }
+
+    // Date range filter
+    if (req.query.dateStart || req.query.dateEnd) {
+      filter.createdAt = {};
+      if (req.query.dateStart) {
+        filter.createdAt.$gte = new Date(req.query.dateStart as string);
+      }
+      if (req.query.dateEnd) {
+        const end = new Date(req.query.dateEnd as string);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    // Search query (matches action, details, username, email, IP)
+    if (req.query.search) {
+      const searchRegex = { $regex: req.query.search as string, $options: 'i' };
+      filter.$or = [
+        { action: searchRegex },
+        { details: searchRegex },
+        { username: searchRegex },
+        { fullName: searchRegex },
+        { email: searchRegex },
+        { ipAddress: searchRegex }
+      ];
+    }
+
+    const total = await ActivityLog.countDocuments(filter);
+    const logs = await ActivityLog.find(filter)
+      .populate('userId')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    res.json({
+      logs,
+      total,
+      pages: Math.ceil(total / limit),
+      currentPage: page,
+    });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Fetch activity logs error:', error);
+    res.status(500).json({ error: 'An error occurred fetching activity logs.' });
+  }
+});
+
+// Archive Logs Endpoint (Super Admin only)
+router.post('/activity-logs/archive', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.user!.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Forbidden: Only Super Admins can archive logs.' });
+    }
+
+    const { days } = req.body;
+    if (!days || typeof days !== 'number' || days < 1) {
+      return res.status(400).json({ error: 'Invalid number of days specified.' });
+    }
+
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+
+    const result = await ActivityLog.deleteMany({ createdAt: { $lt: cutoffDate } });
+
+    await logActivity(
+      req.user!.id,
+      'ARCHIVE_LOGS',
+      `Archived and deleted ${result.deletedCount} audit logs older than ${days} days.`
+    );
+
+    res.json({
+      success: true,
+      message: `Successfully archived audit logs. Deleted ${result.deletedCount} records older than ${days} days.`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'An error occurred during log archiving.' });
+  }
+});
+
+// Trigger Manual Database Backup (Super Admin only)
+router.post('/backup', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.user!.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Forbidden: Only Super Admins can trigger backups.' });
+    }
+
+    const filename = await runEncryptedBackup();
+    res.json({
+      success: true,
+      message: 'Encrypted database backup created successfully.',
+      filename,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Manual backup failed.' });
   }
 });
 

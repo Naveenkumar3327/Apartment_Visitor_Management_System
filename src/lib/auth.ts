@@ -1,6 +1,39 @@
 import { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
-import bcrypt from "bcrypt";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_API_URL || "http://localhost:5000";
+
+/**
+ * Sends a refresh request to the Express backend to rotate the access and refresh tokens.
+ */
+async function refreshAccessToken(token: any) {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: token.refreshToken })
+    });
+
+    const refreshedTokens = await response.json();
+
+    if (!response.ok) {
+      throw refreshedTokens;
+    }
+
+    return {
+      ...token,
+      accessToken: refreshedTokens.token,
+      accessTokenExpires: Date.now() + 15 * 60 * 1000, // 15 minutes
+      refreshToken: refreshedTokens.refreshToken ?? token.refreshToken, // Fallback to old token if not rotated
+    };
+  } catch (error) {
+    console.error("Error refreshing access token:", error);
+    return {
+      ...token,
+      error: "RefreshAccessTokenError",
+    };
+  }
+}
 
 export const authOptions: NextAuthOptions = {
   session: {
@@ -20,7 +53,7 @@ export const authOptions: NextAuthOptions = {
         }
 
         try {
-          const response = await fetch("http://localhost:5000/api/auth/login", {
+          const response = await fetch(`${BACKEND_URL}/api/auth/login`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -41,6 +74,7 @@ export const authOptions: NextAuthOptions = {
             email: data.user.email,
             role: data.user.role,
             accessToken: data.token,
+            refreshToken: data.refreshToken,
           };
         } catch (error: any) {
           console.error("Authorize error:", error);
@@ -51,24 +85,34 @@ export const authOptions: NextAuthOptions = {
   ],
   callbacks: {
     async jwt({ token, user, trigger, session }) {
+      // Initial login
       if (user) {
         token.id = user.id;
         token.role = user.role;
         token.accessToken = (user as any).accessToken;
+        token.refreshToken = (user as any).refreshToken;
+        token.accessTokenExpires = Date.now() + 15 * 60 * 1000; // 15 minutes
       }
       
-      // Allow dynamic updates to token (e.g. name update)
+      // Dynamic updates (e.g. settings/name changes)
       if (trigger === "update" && session) {
         return { ...token, ...session };
       }
       
-      return token;
+      // Return previous token if the access token has not expired yet
+      if (Date.now() < (token.accessTokenExpires as number)) {
+        return token;
+      }
+      
+      // Access token has expired, trigger refresh
+      return refreshAccessToken(token);
     },
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.id as string;
         session.user.role = token.role as string;
         (session.user as any).accessToken = token.accessToken;
+        (session.user as any).error = token.error;
       }
       return session;
     }

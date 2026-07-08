@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { useSession } from "use-session"; // Wait, standard is `useSession` from `next-auth/react`
 import { useSession as useAuthSession } from "next-auth/react";
 import { ShieldAlert, Flame, Activity, ShieldCheck, HeartPulse, Send, AlertTriangle, AlertCircle } from "lucide-react";
 import { triggerEmergencyAlert, getActiveEmergencies, resolveEmergencyAlert } from "@/app/actions/emergency";

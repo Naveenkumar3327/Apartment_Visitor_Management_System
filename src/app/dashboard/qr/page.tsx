@@ -9,13 +9,13 @@ import QRCode from "qrcode";
 
 export default function QRInvitePage() {
   const { data: session } = useSession();
-  
+
   const [visitorName, setVisitorName] = useState("");
   const [visitorPhone, setVisitorPhone] = useState("");
   const [visitorType, setVisitorType] = useState("Guest");
   const [expiryHours, setExpiryHours] = useState(24);
   const [loading, setLoading] = useState(false);
-  
+
   // Generated pass state
   const [generatedPass, setGeneratedPass] = useState<any>(null);
   const [qrCodeUrl, setQrCodeUrl] = useState<string>("");
@@ -33,12 +33,12 @@ export default function QRInvitePage() {
           light: "#ffffff",
         }
       })
-      .then(url => {
-        setQrCodeUrl(url);
-      })
-      .catch(err => {
-        console.error("QR Code generation error:", err);
-      });
+        .then(url => {
+          setQrCodeUrl(url);
+        })
+        .catch(err => {
+          console.error("QR Code generation error:", err);
+        });
     }
   }, [generatedPass]);
 
@@ -70,7 +70,7 @@ export default function QRInvitePage() {
       if (result.error) {
         toast.error(result.error, { id: toastId });
       } else {
-        toast.success(result.message, { id: toastId });
+        toast.success(result.message ?? "Pass generated successfully!", { id: toastId });
         setGeneratedPass(result.pass);
         // Clear input form
         setVisitorName("");
@@ -98,7 +98,7 @@ export default function QRInvitePage() {
 
   return (
     <div className="space-y-6">
-      
+
       {/* Page Title */}
       <div>
         <h2 className="font-heading font-bold text-2xl text-text-primary">Pre-book Visitor / Invite Guest</h2>
@@ -106,11 +106,11 @@ export default function QRInvitePage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-        
+
         {/* Invite Form */}
         <div className="p-6 rounded-2xl glass-panel-heavy space-y-6">
           <h3 className="font-heading font-semibold text-sm text-text-primary">Visitor Pass Specifications</h3>
-          
+
           <form onSubmit={handleGenerate} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-text-secondary mb-1.5 uppercase tracking-wider">Visitor Name</label>
@@ -201,7 +201,7 @@ export default function QRInvitePage() {
           {generatedPass ? (
             <div className="space-y-4">
               {/* Premium ticket pass container */}
-              <div 
+              <div
                 ref={passCardRef}
                 className="p-6 rounded-2xl bg-white text-slate-900 border border-slate-200 shadow-xl max-w-sm mx-auto space-y-6 text-center relative overflow-hidden"
               >
@@ -229,8 +229,8 @@ export default function QRInvitePage() {
                   <span className="text-[10px] text-slate-400 block font-semibold">TICKET ID / CODE</span>
                   <span className="font-mono font-bold text-sm tracking-widest text-indigo-600 uppercase flex items-center justify-center space-x-1.5">
                     <span>{generatedPass.code}</span>
-                    <button 
-                      onClick={copyToClipboard} 
+                    <button
+                      onClick={copyToClipboard}
                       className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-200/50 transition-colors"
                       title="Copy code"
                     >

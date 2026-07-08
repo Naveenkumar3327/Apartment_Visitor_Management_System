@@ -1,10 +1,20 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { encrypt, decrypt, encryptDeterministic, decryptDeterministic } from '../utils/crypto';
+
+// Non-deterministic encrypt/decrypt setters & getters
+const encryptField = (val: any) => val ? encrypt(String(val)) : val;
+const decryptField = (val: any) => val ? decrypt(String(val)) : val;
+
+// Deterministic encrypt/decrypt setters & getters
+const encryptDeterministicField = (val: any) => val ? encryptDeterministic(String(val)) : val;
+const decryptDeterministicField = (val: any) => val ? decryptDeterministic(String(val)) : val;
 
 // Global function to apply schema options (virtual 'id', JSON mapping)
 function configureSchema(schema: Schema) {
   schema.set('toJSON', {
     virtuals: true,
     versionKey: false,
+    getters: true,
     transform: (doc, ret: any) => {
       if (ret._id) {
         ret.id = ret._id.toString();
@@ -15,6 +25,7 @@ function configureSchema(schema: Schema) {
   schema.set('toObject', {
     virtuals: true,
     versionKey: false,
+    getters: true,
     transform: (doc, ret: any) => {
       if (ret._id) {
         ret.id = ret._id.toString();
@@ -67,6 +78,12 @@ const FlatSchema = new Schema({
   floorId: { type: Schema.Types.ObjectId, ref: 'Floor', required: true },
   apartmentId: { type: Schema.Types.ObjectId, ref: 'Apartment', required: true },
 });
+FlatSchema.virtual('block').get(function(this: any) {
+  return this.blockId;
+});
+FlatSchema.virtual('floor').get(function(this: any) {
+  return this.floorId;
+});
 configureSchema(FlatSchema);
 
 // 6. Resident Model
@@ -74,16 +91,16 @@ const ResidentSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   flatId: { type: Schema.Types.ObjectId, ref: 'Flat', required: true },
   isOwner: { type: Boolean, default: true },
-  phone: { type: String, required: true },
+  phone: { type: String, required: true, get: decryptDeterministicField, set: encryptDeterministicField },
   email: { type: String, required: true },
-  vehicleDetails: { type: String, default: null }, // JSON string of vehicles
-  emergencyContact: { type: String, default: null }, // JSON string of emergency contact details
+  vehicleDetails: { type: String, default: null, get: decryptField, set: encryptField }, // JSON string of vehicles
+  emergencyContact: { type: String, default: null, get: decryptField, set: encryptField }, // JSON string of emergency contact details
   photoUrl: { type: String, default: null },
   documentUrl: { type: String, default: null },
   moveInDate: { type: Date, default: Date.now },
   moveOutDate: { type: Date, default: null },
   status: { type: String, default: 'ACTIVE' }, // ACTIVE, INACTIVE
-  familyMembers: { type: String, default: null }, // JSON string of members
+  familyMembers: { type: String, default: null, get: decryptField, set: encryptField }, // JSON string of members
 });
 configureSchema(ResidentSchema);
 
@@ -104,14 +121,14 @@ configureSchema(SecurityGuardSchema);
 // 8. Visitor Model
 const VisitorSchema = new Schema({
   name: { type: String, required: true },
-  phone: { type: String, required: true, unique: true },
-  email: { type: String, default: null },
+  phone: { type: String, required: true, unique: true, get: decryptDeterministicField, set: encryptDeterministicField },
+  email: { type: String, default: null, get: decryptField, set: encryptField },
   gender: { type: String, default: null },
-  address: { type: String, default: null },
-  idProof: { type: String, default: null }, // JSON string of document
+  address: { type: String, default: null, get: decryptField, set: encryptField },
+  idProof: { type: String, default: null, get: decryptField, set: encryptField }, // JSON string of document
   photoUrl: { type: String, default: null },
   isBlacklisted: { type: Boolean, default: false },
-  notes: { type: String, default: null },
+  notes: { type: String, default: null, get: decryptField, set: encryptField },
 });
 configureSchema(VisitorSchema);
 
@@ -134,6 +151,15 @@ const VisitorLogSchema = new Schema({
   isEmergency: { type: Boolean, default: false },
   passId: { type: Schema.Types.ObjectId, ref: 'VisitorPass', default: null },
 });
+VisitorLogSchema.virtual('visitor').get(function(this: any) {
+  return this.visitorId;
+});
+VisitorLogSchema.virtual('flat').get(function(this: any) {
+  return this.flatId;
+});
+VisitorLogSchema.virtual('resident').get(function(this: any) {
+  return this.residentId;
+});
 configureSchema(VisitorLogSchema);
 
 // 10. VisitorApproval Model
@@ -142,6 +168,12 @@ const VisitorApprovalSchema = new Schema({
   residentId: { type: Schema.Types.ObjectId, ref: 'Resident', required: true },
   status: { type: String, default: 'PENDING' }, // PENDING, APPROVED, REJECTED, EXPIRED
   notes: { type: String, default: null },
+});
+VisitorApprovalSchema.virtual('log').get(function(this: any) {
+  return this.logId;
+});
+VisitorApprovalSchema.virtual('resident').get(function(this: any) {
+  return this.residentId;
 });
 configureSchema(VisitorApprovalSchema);
 
@@ -181,9 +213,31 @@ configureSchema(AnnouncementSchema);
 // 14. ActivityLog Model
 const ActivityLogSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
-  action: { type: String, required: true }, // LOGIN, CHECK_IN, APPROVED_VISITOR, etc.
-  details: { type: String, required: true },
+  username: { type: String, default: null },
+  fullName: { type: String, default: null },
+  role: { type: String, default: null },
+  email: { type: String, default: null },
+  deviceName: { type: String, default: null },
+  deviceType: { type: String, default: null },
+  operatingSystem: { type: String, default: null },
+  browserName: { type: String, default: null },
+  browserVersion: { type: String, default: null },
   ipAddress: { type: String, default: null },
+  location: { type: String, default: null },
+  loginTime: { type: Date, default: null },
+  logoutTime: { type: Date, default: null },
+  sessionDuration: { type: Number, default: null }, // in seconds
+  sessionId: { type: String, default: null },
+  authMethod: { type: String, default: null },
+  action: { type: String, required: true }, // Action Performed
+  moduleName: { type: String, default: null },
+  apiEndpoint: { type: String, default: null },
+  requestMethod: { type: String, default: null },
+  responseStatus: { type: Number, default: null },
+  status: { type: String, enum: ['SUCCESS', 'FAILURE'], default: 'SUCCESS' },
+  failureReason: { type: String, default: null },
+  details: { type: String, default: null },
+  lastActivityTime: { type: Date, default: Date.now },
 });
 configureSchema(ActivityLogSchema);
 
@@ -207,6 +261,7 @@ const SettingsSchema = new Schema({
   notificationSettings: { type: String, default: 'EMAIL_SMS' },
   theme: { type: String, default: 'LIGHT' },
   language: { type: String, default: 'en' },
+  singleSessionPerUser: { type: Boolean, default: false },
 });
 configureSchema(SettingsSchema);
 
@@ -227,3 +282,15 @@ export const Announcement = mongoose.model('Announcement', AnnouncementSchema);
 export const ActivityLog = mongoose.model('ActivityLog', ActivityLogSchema);
 export const EmergencyAlert = mongoose.model('EmergencyAlert', EmergencyAlertSchema);
 export const Settings = mongoose.model('Settings', SettingsSchema);
+
+// 17. RefreshToken Model
+const RefreshTokenSchema = new Schema({
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  token: { type: String, required: true, unique: true },
+  expiresAt: { type: Date, required: true },
+  ipAddress: { type: String, default: null },
+  userAgent: { type: String, default: null },
+  isRevoked: { type: Boolean, default: false },
+});
+configureSchema(RefreshTokenSchema);
+export const RefreshToken = mongoose.model('RefreshToken', RefreshTokenSchema);
